@@ -22,6 +22,7 @@ package com.baidu.hugegraph.schema.builder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiPredicate;
@@ -33,13 +34,16 @@ import com.baidu.hugegraph.backend.id.IdGenerator;
 import com.baidu.hugegraph.backend.tx.SchemaTransaction;
 import com.baidu.hugegraph.config.CoreOptions;
 import com.baidu.hugegraph.exception.ExistedException;
-import com.baidu.hugegraph.exception.NotSupportException;
+import com.baidu.hugegraph.exception.NotAllowException;
+import com.baidu.hugegraph.exception.NotFoundException;
 import com.baidu.hugegraph.schema.IndexLabel;
 import com.baidu.hugegraph.schema.PropertyKey;
 import com.baidu.hugegraph.schema.SchemaElement;
 import com.baidu.hugegraph.schema.SchemaLabel;
+import com.baidu.hugegraph.schema.Userdata;
 import com.baidu.hugegraph.schema.VertexLabel;
 import com.baidu.hugegraph.type.HugeType;
+import com.baidu.hugegraph.type.define.Action;
 import com.baidu.hugegraph.type.define.Cardinality;
 import com.baidu.hugegraph.type.define.DataType;
 import com.baidu.hugegraph.type.define.IndexType;
@@ -56,6 +60,7 @@ public class IndexLabelBuilder implements IndexLabel.Builder {
     private String baseValue;
     private IndexType indexType;
     private List<String> indexFields;
+    private Userdata userdata;
     private boolean checkExist;
 
     private SchemaTransaction transaction;
@@ -65,8 +70,11 @@ public class IndexLabelBuilder implements IndexLabel.Builder {
         E.checkNotNull(transaction, "transaction");
         this.id = null;
         this.name = name;
+        this.baseType = HugeType.SYS_SCHEMA;
+        this.baseValue = null;
         this.indexType = IndexType.SECONDARY;
         this.indexFields = new ArrayList<>();
+        this.userdata = new Userdata();
         this.checkExist = true;
         this.transaction = transaction;
     }
@@ -85,6 +93,7 @@ public class IndexLabelBuilder implements IndexLabel.Builder {
             PropertyKey propertyKey = this.transaction.getPropertyKey(field);
             indexLabel.indexField(propertyKey.id());
         }
+        indexLabel.userdata(this.userdata);
         return indexLabel;
     }
 
@@ -113,6 +122,7 @@ public class IndexLabelBuilder implements IndexLabel.Builder {
          */
         this.checkFields(schemaLabel.properties());
         this.checkRepeatIndex(schemaLabel);
+        this.checkUserdata(Action.INSERT);
 
         // Async delete index label which is prefix of the new index label
         // TODO: use event to replace direct call
@@ -160,12 +170,36 @@ public class IndexLabelBuilder implements IndexLabel.Builder {
 
     @Override
     public IndexLabel append() {
-        throw new NotSupportException("action append on index label");
+        IndexLabel indexLabel = this.transaction.getIndexLabel(this.name);
+        if (indexLabel == null) {
+            throw new NotFoundException("Can't update index label '%s' " +
+                                        "since it doesn't exist", this.name);
+        }
+        this.checkStableVars();
+        this.checkUserdata(Action.APPEND);
+
+        SchemaLabel schemaLabel = this.loadElement(indexLabel.baseType(),
+                                                   indexLabel.baseValue());
+        indexLabel.userdata(this.userdata);
+        this.transaction.addIndexLabel(schemaLabel, indexLabel);
+        return indexLabel;
     }
 
     @Override
     public IndexLabel eliminate() {
-        throw new NotSupportException("action eliminate on index label");
+        IndexLabel indexLabel = this.transaction.getIndexLabel(this.name);
+        if (indexLabel == null) {
+            throw new NotFoundException("Can't update index label '%s' " +
+                                        "since it doesn't exist", this.name);
+        }
+        this.checkStableVars();
+        this.checkUserdata(Action.ELIMINATE);
+
+        SchemaLabel schemaLabel = this.loadElement(indexLabel.baseType(),
+                                                   indexLabel.baseValue());
+        indexLabel.removeUserdata(this.userdata);
+        this.transaction.addIndexLabel(schemaLabel, indexLabel);
+        return indexLabel;
     }
 
     @Override
@@ -274,6 +308,18 @@ public class IndexLabelBuilder implements IndexLabel.Builder {
     }
 
     @Override
+    public IndexLabel.Builder userdata(String key, Object value) {
+        this.userdata.put(key, value);
+        return this;
+    }
+
+    @Override
+    public IndexLabel.Builder userdata(Map<String, Object> userdata) {
+        this.userdata.putAll(userdata);
+        return this;
+    }
+
+    @Override
     public IndexLabelBuilder ifNotExist() {
         this.checkExist = false;
         return this;
@@ -286,26 +332,44 @@ public class IndexLabelBuilder implements IndexLabel.Builder {
     }
 
     private SchemaLabel loadElement() {
-        E.checkNotNull(this.baseType, "base type", "index label");
-        E.checkNotNull(this.baseValue, "base value", "index label");
+        return this.loadElement(this.baseType, this.baseValue);
+    }
 
-        SchemaLabel schemaLabel;
-        switch (this.baseType) {
+    private SchemaLabel loadElement(HugeType baseType, Object baseValue) {
+        E.checkNotNull(baseType, "base type", "index label");
+        E.checkNotNull(baseValue, "base value", "index label");
+        E.checkArgument(baseValue instanceof String || baseValue instanceof Id,
+                        "The base value must be instance of String or Id, " +
+                        "but got %s(%s)", baseValue,
+                        baseValue.getClass().getSimpleName());
+
+        SchemaLabel label;
+        switch (baseType) {
             case VERTEX_LABEL:
-                schemaLabel = this.transaction.getVertexLabel(this.baseValue);
+                if (baseValue instanceof String) {
+                    label = this.transaction.getVertexLabel((String) baseValue);
+                } else {
+                    assert baseValue instanceof Id;
+                    label = this.transaction.getVertexLabel((Id) baseValue);
+                }
                 break;
             case EDGE_LABEL:
-                schemaLabel = this.transaction.getEdgeLabel(this.baseValue);
+                if (baseValue instanceof String) {
+                    label = this.transaction.getEdgeLabel((String) baseValue);
+                } else {
+                    assert baseValue instanceof Id;
+                    label = this.transaction.getEdgeLabel((Id) baseValue);
+                }
                 break;
             default:
                 throw new AssertionError(String.format(
                           "Unsupported base type '%s' of index label '%s'",
-                          this.baseType, this.name));
+                          baseType, this.name));
         }
 
-        E.checkArgumentNotNull(schemaLabel, "Can't find the %s with name '%s'",
-                               this.baseType.readableName(), this.baseValue);
-        return schemaLabel;
+        E.checkArgumentNotNull(label, "Can't find the %s with name '%s'",
+                               baseType.readableName(), baseValue);
+        return label;
     }
 
     private void checkFields(Set<Id> propertyIds) {
@@ -553,5 +617,46 @@ public class IndexLabelBuilder implements IndexLabel.Builder {
         PropertyKey propertyKey = this.transaction.getPropertyKey(field);
         DataType dataType = propertyKey.dataType();
         return dataType.isNumber() || dataType.isDate();
+    }
+
+    private void checkStableVars() {
+        if (this.baseType != HugeType.SYS_SCHEMA) {
+            throw new NotAllowException("Not allowed to update base type " +
+                                        "for index label '%s'", this.name);
+        }
+        if (this.baseValue != null) {
+            throw new NotAllowException("Not allowed to update base value " +
+                                        "for index label '%s'", this.name);
+        }
+        if (this.indexType != IndexType.SECONDARY) {
+            throw new NotAllowException("Not allowed to update index type " +
+                                        "for index label '%s'", this.name);
+        }
+        if (this.indexFields != null && !this.indexFields.isEmpty()) {
+            throw new NotAllowException("Not allowed to update index fields " +
+                                        "for index label '%s'", this.name);
+        }
+    }
+
+    private void checkUserdata(Action action) {
+        switch (action) {
+            case INSERT:
+            case APPEND:
+                for (Map.Entry<String, Object> e : this.userdata.entrySet()) {
+                    if (e.getValue() == null) {
+                        throw new NotAllowException(
+                                  "Not allowed pass null userdata value when " +
+                                  "create or append index label");
+                    }
+                }
+                break;
+            case ELIMINATE:
+            case DELETE:
+                // pass
+                break;
+            default:
+                throw new AssertionError(String.format(
+                          "Unknown schema action '%s'", action));
+        }
     }
 }

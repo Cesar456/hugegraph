@@ -28,6 +28,7 @@ import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
+import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
@@ -44,6 +45,7 @@ import com.baidu.hugegraph.backend.id.Id;
 import com.baidu.hugegraph.core.GraphManager;
 import com.baidu.hugegraph.define.Checkable;
 import com.baidu.hugegraph.schema.IndexLabel;
+import com.baidu.hugegraph.schema.Userdata;
 import com.baidu.hugegraph.type.HugeType;
 import com.baidu.hugegraph.type.define.GraphMode;
 import com.baidu.hugegraph.type.define.IndexType;
@@ -75,6 +77,31 @@ public class IndexLabelAPI extends API {
         IndexLabel.CreatedIndexLabel il = builder.createWithTask();
         il.indexLabel(mapIndexLabel(il.indexLabel()));
         return manager.serializer(g).writeCreatedIndexLabel(il);
+    }
+
+    @PUT
+    @Timed
+    @Path("{name}")
+    @Consumes(APPLICATION_JSON)
+    @Produces(APPLICATION_JSON_WITH_CHARSET)
+    public String update(@Context GraphManager manager,
+                         @PathParam("graph") String graph,
+                         @PathParam("name") String name,
+                         @QueryParam("action") String action,
+                         IndexLabelAPI.JsonIndexLabel jsonIndexLabel) {
+        LOG.debug("Graph [{}] {} index label: {}",
+                  graph, action, jsonIndexLabel);
+        checkUpdatingBody(jsonIndexLabel);
+        E.checkArgument(name.equals(jsonIndexLabel.name),
+                        "The name in url(%s) and body(%s) are different",
+                        name, jsonIndexLabel.name);
+        // Parse action parameter
+        boolean append = checkAndParseAction(action);
+
+        HugeGraph g = graph(manager, graph);
+        IndexLabel.Builder builder = jsonIndexLabel.convert2Builder(g);
+        IndexLabel IndexLabel = append ? builder.append() : builder.eliminate();
+        return manager.serializer(g).writeIndexlabel(IndexLabel);
     }
 
     @GET
@@ -171,6 +198,8 @@ public class IndexLabelAPI extends API {
         public IndexType indexType;
         @JsonProperty("fields")
         public String[] fields;
+        @JsonProperty("user_data")
+        public Userdata userdata;
         @JsonProperty("check_exist")
         public Boolean checkExist;
 
@@ -208,6 +237,9 @@ public class IndexLabelAPI extends API {
             }
             if (this.fields != null) {
                 builder.by(this.fields);
+            }
+            if (this.userdata != null) {
+                builder.userdata(this.userdata);
             }
             if (this.checkExist != null) {
                 builder.checkExist(this.checkExist);
